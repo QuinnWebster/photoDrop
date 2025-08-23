@@ -12,10 +12,19 @@ export class InfraStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // 1. S3 bucket for storing images
+    // API Gateway
+    const api = new apigateway.RestApi(this, "PhotoDropApi", {
+      restApiName: "PhotoDrop Service",
+      defaultCorsPreflightOptions: {
+        allowOrigins: apigateway.Cors.ALL_ORIGINS,
+        allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      },
+    });
+
+    // S3 bucket for storing images
     const photoBucket = new s3.Bucket(this, "PhotoBucket", {
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY, // This bucket will be automatically destroyed when stack is deleted
+      autoDeleteObjects: true, // Will delete all objects in the bucket when the bucketed is deleted
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       cors: [
         {
@@ -32,40 +41,37 @@ export class InfraStack extends cdk.Stack {
       ],
     });
 
-    // 2. Lambda to generate signed upload URLs
+    // Lamda
     const uploadLambda = new lambda.Function(this, "UploadLambda", {
       runtime: lambda.Runtime.NODEJS_18_X,
       handler: "index.handler",
-      code: lambda.Code.fromAsset("lambda/upload"), // <--- points to the folder
+      code: lambda.Code.fromAsset("lambda/upload"),
       environment: {
-        BUCKET: photoBucket.bucketName,
+        BUCKET: photoBucket.bucketName, // The lambda will have access to this bucket
       },
     });
 
     // Grant Lambda permission to put objects into the bucket
     photoBucket.grantPut(uploadLambda);
 
-    // 3. API Gateway to expose Lambda
-    const api = new apigateway.RestApi(this, "PhotoDropApi", {
-      restApiName: "PhotoDrop Service",
-      defaultCorsPreflightOptions: {
-        allowOrigins: apigateway.Cors.ALL_ORIGINS,
-        allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-      },
-    });
-
+    // API endpoint that returns a presigned URL for uploading images to S3
+    // We dont want to upload directly to S3 from the client so we use lambda instead
     const uploadResource = api.root.addResource("get-upload-url");
     uploadResource.addMethod(
       "POST",
       new apigateway.LambdaIntegration(uploadLambda)
     );
 
+    // DynamoDB table for storing photo metadata
     const photosTable = new dynamodb.Table(this, "PhotosTable", {
       partitionKey: { name: "photoId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // Lambda function for tagging photos
+    // Uses NodejsFunction instead of Function since it uses external node modules
+    // In future should use docker
     const taggingLambda = new lambdaNodejs.NodejsFunction(
       this,
       "TaggingLambda",
@@ -74,22 +80,25 @@ export class InfraStack extends cdk.Stack {
         entry: "lambda/tagging/index.js",
         handler: "handler",
         bundling: {
-          forceDockerBundling: false, // <--- try local esbuild first
+          forceDockerBundling: false,
         },
         environment: {
-          BUCKET: photoBucket.bucketName,
-          TABLE_NAME: photosTable.tableName,
+          BUCKET: photoBucket.bucketName, // So that the lambda can access the bucket
+          TABLE_NAME: photosTable.tableName, // So that the lambda can access the table
         },
       }
     );
 
-    photoBucket.grantRead(taggingLambda);
+    photoBucket.grantRead(taggingLambda); // Allows photo tagging lambda to read from photo bucket
+    photosTable.grantWriteData(taggingLambda); // Allows photo tagging lambda to write to ddb photos table
 
+    // When a new image is uploaded, trigger the tagging lambda
     photoBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED_PUT,
       new s3n.LambdaDestination(taggingLambda)
     );
 
+    // Allows tagging lambda to use Rekognition
     taggingLambda.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["rekognition:DetectLabels"],
@@ -97,8 +106,7 @@ export class InfraStack extends cdk.Stack {
       })
     );
 
-    photosTable.grantWriteData(taggingLambda);
-
+    // Lambda function for searching photos in ddb
     const searchLambda = new lambdaNodejs.NodejsFunction(this, "SearchLambda", {
       runtime: lambda.Runtime.NODEJS_18_X,
       entry: "lambda/search/index.js",
@@ -108,16 +116,16 @@ export class InfraStack extends cdk.Stack {
       },
     });
 
-    photosTable.grantReadData(searchLambda);
-    photoBucket.grantRead(searchLambda);
+    photosTable.grantReadData(searchLambda); // Allows search lambda to read from ddb photos table
+    photoBucket.grantRead(searchLambda); // Allows search lambda to read from photo bucket
 
+    // Will hit the search lambda
     const searchResource = api.root.addResource("search");
     searchResource.addMethod(
       "GET",
       new apigateway.LambdaIntegration(searchLambda),
       {
         authorizationType: apigateway.AuthorizationType.NONE,
-        // 👇 This adds CORS preflight and proper headers
         methodResponses: [
           {
             statusCode: "200",
@@ -128,7 +136,7 @@ export class InfraStack extends cdk.Stack {
         ],
       }
     );
-    // Output the API URL after deploy
+    // Output the API URL after deploy, so that it can be used in frontend
     new cdk.CfnOutput(this, "ApiUrl", {
       value: api.url ?? "Something went wrong",
     });
