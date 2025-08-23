@@ -1,0 +1,4 @@
+Handle duplicate file names
+Improve frontend
+Make create account
+make it use docker
