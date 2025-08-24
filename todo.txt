@@ -1,6 +1,6 @@
 Handle duplicate file names
-Improve frontend
 Make create account
 make it use docker
 Make it so that only I can access my aws stuff
 Set up IAM
+Make arcitecture diagram

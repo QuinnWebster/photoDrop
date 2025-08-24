@@ -136,6 +136,35 @@ export class InfraStack extends cdk.Stack {
         ],
       }
     );
+
+    const topTagsLambda = new lambda.Function(this, "TopTagsLambda", {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset("lambda/topTags"),
+      environment: {
+        TABLE_NAME: photosTable.tableName,
+      },
+    });
+
+    photosTable.grantReadData(topTagsLambda); // Allows top tags lambda to read to ddb photos table
+
+    const topTagsResource = api.root.addResource("top-tags");
+    topTagsResource.addMethod(
+      "GET",
+      new apigateway.LambdaIntegration(topTagsLambda),
+      {
+        authorizationType: apigateway.AuthorizationType.NONE,
+        methodResponses: [
+          {
+            statusCode: "200",
+            responseParameters: {
+              "method.response.header.Access-Control-Allow-Origin": true,
+            },
+          },
+        ],
+      }
+    );
+
     // Output the API URL after deploy, so that it can be used in frontend
     new cdk.CfnOutput(this, "ApiUrl", {
       value: api.url ?? "Something went wrong",
