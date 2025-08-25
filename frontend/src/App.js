@@ -52,6 +52,8 @@ function App() {
 
   // Search flow
   const handleSearch = async () => {
+    console.log("Serarhing!");
+    console.log("test", searchTags.length);
     if (searchTags.length === 0) return;
     setLoading(true);
 
@@ -60,12 +62,20 @@ function App() {
         "https://spgf8l3if3.execute-api.us-west-2.amazonaws.com/prod/search",
         {
           params: {
-            tags: searchTags.map((t) => t.toLowerCase()).join(","),
+            tags: searchTags?.map((t) => t.toLowerCase()).join(","),
           },
         }
       );
+      console.log("Search results:", res);
 
-      setResults(res.data);
+      setResults(
+        res?.data?.results?.map((photo) => ({
+          id: photo.photoId,
+          url: photo.url,
+          tags: photo.labels,
+          score: photo.score,
+        }))
+      );
     } catch (err) {
       console.error("Search failed:", err);
       alert("Search failed");
@@ -73,6 +83,8 @@ function App() {
       setLoading(false);
     }
   };
+
+  console.log("Results", results);
 
   const handleTopTags = async () => {
     try {
@@ -102,9 +114,9 @@ function App() {
     return str.charAt(0).toUpperCase() + str.slice(1);
   }
 
-  useEffect(() => {
-    handleTopTags();
-  }, []);
+  // useEffect(() => {
+  //   handleTopTags();
+  // }, []);
 
   return (
     <div
@@ -321,7 +333,7 @@ function App() {
               gap: "15px",
             }}
           >
-            {results.map((photo) => (
+            {results?.map((photo) => (
               <div
                 key={photo.photoId}
                 style={{
@@ -340,11 +352,9 @@ function App() {
                     marginBottom: "10px",
                   }}
                 />
-                {/* <p>
-                  <b>Tags:</b> {photo.tags?.join(", ") || "None"}
-                </p> */}
+
                 <p style={{ color: "#555", fontSize: "0.9em" }}>
-                  <b>Uploaded:</b> {photo.uploadedAt}
+                  <b>similarity:</b> {photo.score}
                 </p>
               </div>
             ))}
