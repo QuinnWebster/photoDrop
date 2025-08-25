@@ -7,6 +7,7 @@ import * as s3n from "aws-cdk-lib/aws-s3-notifications";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as lambdaNodejs from "aws-cdk-lib/aws-lambda-nodejs";
+import * as sagemaker from "aws-cdk-lib/aws-sagemaker";
 
 export class InfraStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -81,6 +82,7 @@ export class InfraStack extends cdk.Stack {
         handler: "handler",
         bundling: {
           forceDockerBundling: false,
+          externalModules: ["aws-sdk"],
         },
         environment: {
           BUCKET: photoBucket.bucketName, // So that the lambda can access the bucket
@@ -111,8 +113,14 @@ export class InfraStack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_18_X,
       entry: "lambda/search/index.js",
       handler: "handler",
+      bundling: {
+        forceDockerBundling: false,
+        externalModules: ["aws-sdk"], // 👈 tells esbuild not to bundle aws-sdk
+      },
       environment: {
         TABLE_NAME: photosTable.tableName,
+        BUCKET: photoBucket.bucketName,
+        SM_ENDPOINT_NAME: "your-sagemaker-endpoint", // if you embed here too
       },
     });
 
@@ -164,6 +172,72 @@ export class InfraStack extends cdk.Stack {
         ],
       }
     );
+
+    const smRole = new iam.Role(this, "SmExecutionRole", {
+      assumedBy: new iam.ServicePrincipal("sagemaker.amazonaws.com"),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonSageMakerFullAccess"),
+      ],
+    });
+
+    // us-west-2
+    const hfImageUri =
+      "763104351884.dkr.ecr.us-west-2.amazonaws.com/huggingface-pytorch-inference:1.13.1-transformers4.26.0-cpu-py39-ubuntu20.04";
+
+    // Declare the SageMaker model
+    const model = new sagemaker.CfnModel(this, "EmbeddingsModel", {
+      executionRoleArn: smRole.roleArn,
+      primaryContainer: {
+        image: hfImageUri,
+        environment: {
+          HF_TASK: "feature-extraction",
+          HF_MODEL_ID: "sentence-transformers/all-MiniLM-L6-v2",
+        },
+      },
+      modelName: "photo-embeddings-model",
+    });
+
+    const endpointConfig = new sagemaker.CfnEndpointConfig(
+      this,
+      "EmbeddingsConfig",
+      {
+        productionVariants: [
+          {
+            modelName: model.attrModelName,
+            variantName: "AllTraffic",
+            serverlessConfig: {
+              memorySizeInMb: 2048,
+              maxConcurrency: 5,
+            },
+          },
+        ],
+      }
+    );
+
+    const smEndpointName = "photo-embeddings-endpoint";
+    const endpoint = new sagemaker.CfnEndpoint(this, "EmbeddingsEndpoint", {
+      endpointName: smEndpointName,
+      endpointConfigName: endpointConfig.attrEndpointConfigName,
+    });
+    endpoint.addDependency(endpointConfig);
+    endpoint.addDependency(model);
+
+    const invokeSm = new iam.PolicyStatement({
+      actions: ["sagemaker:InvokeEndpoint"],
+      resources: [
+        `arn:aws:sagemaker:${cdk.Stack.of(this).region}:${
+          cdk.Stack.of(this).account
+        }:endpoint/${smEndpointName}`,
+      ],
+    });
+    taggingLambda.addToRolePolicy(invokeSm);
+    searchLambda.addToRolePolicy(invokeSm);
+
+    taggingLambda.addEnvironment("SM_ENDPOINT_NAME", smEndpointName);
+    searchLambda.addEnvironment("SM_ENDPOINT_NAME", smEndpointName);
+
+    // We’ll also need BUCKET in search lambda to return signed URLs.
+    searchLambda.addEnvironment("BUCKET", photoBucket.bucketName);
 
     // Output the API URL after deploy, so that it can be used in frontend
     new cdk.CfnOutput(this, "ApiUrl", {
